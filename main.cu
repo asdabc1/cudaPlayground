@@ -1,82 +1,68 @@
 #include <iostream>
-__constant__ float k[3][3] = {{1, 2, 3}, {4, 5, 4}, {3, 2, 1}};
-const int rx = 1;
-const int ry = 1;
 
-__global__ void conv(float* A, float* result, int width, int height, int kernelWidth, int kernelHeight) {
-    __shared__ float M[3][3];
+__global__ void suma(float* input, float* output, int size) {
+    const int COARSE_FACTOR = 2;
+    const int blockdim = 128;
+    __shared__ float temp[blockdim];
 
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int segment_start = COARSE_FACTOR * 2 * blockDim.x * blockIdx.x; // index początku każdego segmentu po coarseningu - tworzymy podział wejścia na segmenty
+    int segment_pos = segment_start + threadIdx.x; //pozycja danego wątku w swoim segmencie
 
-    if (row >= height || col >= width)
-        return;
-
-    M[threadIdx.y][threadIdx.x] = A[row * width + col];
+    if (segment_pos < size)
+        temp[threadIdx.x] = input[segment_pos];
 
     __syncthreads();
 
-    float val = 0;
+    for (int i = 1; i < COARSE_FACTOR * 2; i++) {
+        if (threadIdx.x + (i + blockIdx.x) * blockDim.x < size)
+            temp[threadIdx.x] += input[segment_pos + i * blockDim.x];
+    }
 
-    for (int i = 0; i < kernelHeight; i++) {
-        for (int j = 0; j < kernelWidth; j++) {
-            if (threadIdx.x + - rx + j < 3 && threadIdx.y - ry + i < 3 && threadIdx.x + - rx + j > 0 && threadIdx.y - ry + i > 0)
-                val += M[threadIdx.y - ry + i][threadIdx.x + - rx + j] * k[i][j]; //jeśli są w shared memory to liczenie z niej
-            else {
-                if (col - rx + j < 0 || row - ry + i < 0 || col - rx + j >= width || row - ry + i >= height)
-                    continue; //traktowanie ghost cells jako mnożenie przez 0 - ignorowanie
+    __syncthreads();
 
-                val += A[(row + (i - ry)) * width + col + j - rx] * k[i][j]; //jeśli nie są to wyciąganie z globalnej, a tak naprawdę to z cache
-            }
+    for (int step = blockDim.x / 2; step > 0; step /= 2) {
+        if (threadIdx.x < step) {
+            temp[threadIdx.x] += temp[threadIdx.x + step];
         }
     }
 
-    result[row * width + col] = val;
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        atomicAdd(output, temp[0]);
+    }
 }
 
 int main() {
-    float matrix[8][8] = {
-        {35, 21, 67, 34, 1, 9087, 5, 66}, {453, 1, 254, 34, 8, 97, 5, 200}, {568, 1, 2, 3, 74, 21, 37, 520},
-        {46852, 4, 354, 23, 14, 87, 7455, 423}, {75, 10, 0, 4, 2385, 45286, 45621, 774}, {4223, 12, 0, 453, 4, 78931, 0, 0},
-        {1, 2, 3, 4, 5, 6, 5, 6}, {75, 100, 103, 7057, 4522, 457, 731, 2699}
-    };
-    float res[64];
+    float data[1024];
+    float sum = 0;
 
-    float* A, *B;
+    for (int i = 0; i < 1024; i++) {
+        data[i] = i;
+    }
 
-    cudaMalloc((void**)&A, sizeof(float) * 8 * 8 );
-    cudaMalloc((void**)&B, sizeof(float) * 8 * 8 );
+    float* numbers, *s;
 
-    cudaMemcpy(A, matrix, sizeof(float) * 8 * 8, cudaMemcpyHostToDevice);
+    cudaMalloc((void**)&numbers, sizeof(float) * 1024);
+    cudaMalloc((void**)&s, sizeof(float) * 1024);
 
-    dim3 threadsPerBlock(3, 3);
-    dim3 blocks(3, 3);
+    cudaMemset(s, 0, sizeof(float));
 
-    conv<<<blocks, threadsPerBlock>>>(A, B, 8, 8, 3, 3);
+    cudaMemcpy(numbers, data, sizeof(float) * 1024, cudaMemcpyHostToDevice);
+
+    suma<<<2, 128>>>(numbers, s, 1024);
 
     cudaDeviceSynchronize();
     cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess)
-        std::cerr << "CUDA Error: " << cudaGetErrorString(err) << std::endl;
-
-    cudaMemcpy(res, B, sizeof(float) * 8 * 8, cudaMemcpyDeviceToHost);
-    cudaFree(A);
-    cudaFree(B);
-
-    for (int i = 0; i < 64; i++) {
-        if (i % 8 == 0 && i != 0)
-            std::cout << std::endl;
-        std::cout << res[i] << " ";
+    if (err != cudaSuccess) {
+        std::cout << "Error: " << cudaGetErrorString(err) << std::endl;
     }
 
-    std::cout << std::endl << std::endl;
+    cudaMemcpy(&sum, s, sizeof(float), cudaMemcpyDeviceToHost);
 
-    for (int i = 0; i < 8; i++) {
-        for (int j = 0; j < 8; j++) {
-            std::cout << matrix[i][j] << " ";
-        }
-        std::cout << std::endl;
-    }
+    cudaFree(numbers);
+    cudaFree(s);
 
+    std::cout << "suma to: " << sum << std::endl;
     return 0;
 }
